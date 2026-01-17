@@ -21,3 +21,4 @@
 !.github/
 !.github/**
 !/README.md
+!.gitattributes
