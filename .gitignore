@@ -16,3 +16,8 @@
 
 # keep the ignore file itself
 !.gitignore
+
+!kerstbus-sync.ps1
+!.github/
+!.github/**
+!/README.md
