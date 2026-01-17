@@ -1,0 +1,18 @@
+# ignore everything
+*
+
+# allow directories so we can traverse to whitelisted paths
+!*/
+
+# keep these folders
+!mods/
+!mods/**
+
+!datapacks/
+!datapacks/**
+
+!resourcepacks/
+!resourcepacks/**
+
+# keep the ignore file itself
+!.gitignore
