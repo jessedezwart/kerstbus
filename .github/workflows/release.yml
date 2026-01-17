@@ -30,6 +30,11 @@ jobs:
         run: |
           Invoke-ps2exe .\kerstbus-sync.ps1 .\KerstbusSync.exe -title "Kerstbus Sync"
       
+      - name: Create mods archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "mods\*" -DestinationPath "KerstbusMods.zip"
+      
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -48,5 +53,7 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: Release v${{ steps.version.outputs.version }}
-          files: KerstbusSync.exe
+          files: |
+            KerstbusSync.exe
+            KerstbusMods.zip
           generate_release_notes: true
