@@ -8,6 +8,7 @@ on:
     paths:
       - 'kerstbus-sync.ps1'
       - '.github/workflows/release.yml'
+      - 'mods/**'
   workflow_dispatch:
 
 jobs:
