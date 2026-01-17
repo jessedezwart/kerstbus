@@ -23,6 +23,11 @@ jobs:
         with:
           lfs: true
       
+      - name: Pull LFS files
+        shell: pwsh
+        run: |
+          git lfs pull
+      
       - name: Install ps2exe
         shell: pwsh
         run: |
