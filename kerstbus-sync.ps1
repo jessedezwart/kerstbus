@@ -1,14 +1,12 @@
 <#
-Kerstbus Modrinth Sync (first-time setup + subsequent pulls + pre-backup)
+Kerstbus Modrinth Sync (first-time setup + subsequent pulls)
 
 What it does:
 - Finds Modrinth profiles under: %APPDATA%\ModrinthApp\profiles
 - Lets the user pick a profile folder
-- Optional ZIP backup of the selected profile BEFORE syncing
 - First run (no .git): installs Git + Git LFS (via winget), git init -b main, sets remote, fetches + hard-resets to remote + LFS
 - Next runs (.git exists): fetch + hard-reset to remote + LFS
-- Overwrites tracked files to match remote
-- Does NOT delete untracked files (files not in git)
+- Overwrites all local files to match remote (deletes untracked files not in .gitignore)
 
 Run:
 powershell -ExecutionPolicy Bypass -File .\kerstbus-sync.ps1
@@ -25,6 +23,32 @@ $RepoUrl      = "https://github.com/jessedezwart/kerstbus.git"
 $Branch       = "main"
 $ProfilesRoot = Join-Path $env:APPDATA "ModrinthApp\profiles"
 
+# Fancy CLI symbols
+$script:CheckMark = "[+]"
+$script:CrossMark = "[X]"
+$script:Arrow     = ">>>"
+$script:Bullet    = "  *"
+
+function Write-Success {
+  param([string]$Message)
+  Write-Host "$script:CheckMark $Message" -ForegroundColor Green
+}
+
+function Write-Info {
+  param([string]$Message)
+  Write-Host "$script:Arrow $Message" -ForegroundColor Cyan
+}
+
+function Write-Error-Custom {
+  param([string]$Message)
+  Write-Host "$script:CrossMark $Message" -ForegroundColor Red
+}
+
+function Write-Step {
+  param([string]$Message)
+  Write-Host "`n$script:Arrow $Message" -ForegroundColor Yellow
+}
+
 function Require-Winget {
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
     throw "winget is not available. Install 'App Installer' from the Microsoft Store or install Git/Git LFS manually."
@@ -37,8 +61,12 @@ function Ensure-AppInstalled {
     [Parameter(Mandatory=$true)][string]$WingetId
   )
 
-  if (Get-Command $ExeName -ErrorAction SilentlyContinue) { return }
+  if (Get-Command $ExeName -ErrorAction SilentlyContinue) { 
+    Write-Success "$ExeName is installed"
+    return 
+  }
 
+  Write-Info "Installing $ExeName..."
   Require-Winget
   & winget install --id $WingetId --exact --silent --accept-source-agreements --accept-package-agreements | Out-Host
 
@@ -50,6 +78,7 @@ function Ensure-AppInstalled {
   if (-not (Get-Command $ExeName -ErrorAction SilentlyContinue)) {
     throw "Installed $WingetId but $ExeName is not on PATH. Close/reopen the terminal and run the script again."
   }
+  Write-Success "$ExeName installed successfully"
 }
 
 function Select-ModrinthProfileFolder {
@@ -105,36 +134,6 @@ function Select-ModrinthProfileFolder {
   }
 }
 
-function New-ProfileBackupZip {
-  param([Parameter(Mandatory=$true)][string]$ProfilePath)
-
-  $profileName = Split-Path -Path $ProfilePath -Leaf
-  $backupRoot  = Join-Path (Split-Path -Path $ProfilePath -Parent) "_backups"
-  New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-
-  $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-  $zipPath   = Join-Path $backupRoot ("{0}-{1}.zip" -f $profileName, $timestamp)
-
-  $temp = Join-Path $env:TEMP ("kerstbus-backup-" + [Guid]::NewGuid().ToString("N"))
-  New-Item -ItemType Directory -Path $temp -Force | Out-Null
-  $staging = Join-Path $temp $profileName
-
-  Copy-Item -LiteralPath $ProfilePath -Destination $staging -Recurse -Force
-
-  $nestedBackups = Join-Path $staging "_backups"
-  if (Test-Path -LiteralPath $nestedBackups) {
-    Remove-Item -LiteralPath $nestedBackups -Recurse -Force
-  }
-
-  if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  [System.IO.Compression.ZipFile]::CreateFromDirectory($staging, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
-
-  Remove-Item -LiteralPath $temp -Recurse -Force
-  Write-Host "Backup created: $zipPath"
-}
-
 function Invoke-Git {
   param([Parameter(Mandatory=$true)][string[]]$GitArgs)
 
@@ -155,86 +154,176 @@ function Ensure-RepoSetup {
   Set-Location -LiteralPath $Path
 
   if (-not (Test-Path -LiteralPath ".git")) {
+    Write-Info "Initializing git repository..."
     $r = Invoke-Git @("init","-b",$Branch)
-    $r.Output | Out-Host
     if ($r.ExitCode -ne 0) { throw "git init failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")" }
+    Write-Success "Git initialized"
   }
 
   $r = Invoke-Git @("remote")
   $hasOrigin = ($r.Output | Select-String -SimpleMatch "origin") -ne $null
 
   if (-not $hasOrigin) {
+    Write-Info "Adding remote origin..."
     $r = Invoke-Git @("remote","add","origin",$RepoUrl)
-    $r.Output | Out-Host
     if ($r.ExitCode -ne 0) { throw "git remote add failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")" }
+    Write-Success "Remote configured"
   } else {
     $r = Invoke-Git @("remote","set-url","origin",$RepoUrl)
-    $r.Output | Out-Host
     if ($r.ExitCode -ne 0) { throw "git remote set-url failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")" }
   }
 }
 
 function Ensure-LfsReady {
+  Write-Info "Configuring Git LFS..."
   $r = Invoke-Git @("lfs","install")
-  $r.Output | Out-Host
   if ($r.ExitCode -ne 0) { throw "git lfs install failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")" }
+  Write-Success "Git LFS ready"
 }
 
-function Sync-ToRemote {
+function Show-SyncPreview {
   param([Parameter(Mandatory=$true)][string]$BranchName)
 
-  Write-Host "Fetching from repository..."
+  Write-Info "Analyzing changes..."
+
+  # Check modified/deleted tracked files
+  $r = Invoke-Git @("diff","--name-status","HEAD","origin/$BranchName")
+  $trackedChanges = $r.Output | Where-Object { $_ -match '\S' }
+
+  # Check untracked files that will be deleted
+  $r = Invoke-Git @("clean","-fd","--dry-run")
+  $untrackedFiles = $r.Output | Where-Object { $_ -match '^Would remove' } | ForEach-Object { $_ -replace '^Would remove ', '' }
+
+  $hasChanges = $false
+  $modCount = 0
+  $addCount = 0
+  $delCount = 0
+  $remCount = 0
+
+  if ($trackedChanges -and $trackedChanges.Count -gt 0) {
+    $hasChanges = $true
+    Write-Host ""
+    Write-Host "=== FILES TO BE UPDATED ===" -ForegroundColor Yellow
+    foreach ($line in $trackedChanges) {
+      if ($line -match '^M\s+(.+)') {
+        Write-Host "  [~] $($matches[1])" -ForegroundColor Yellow
+        $modCount++
+      } elseif ($line -match '^A\s+(.+)') {
+        Write-Host "  [+] $($matches[1])" -ForegroundColor Green
+        $addCount++
+      } elseif ($line -match '^D\s+(.+)') {
+        Write-Host "  [-] $($matches[1])" -ForegroundColor Red
+        $delCount++
+      } else {
+        Write-Host "  $line"
+      }
+    }
+  }
+
+  if ($untrackedFiles -and $untrackedFiles.Count -gt 0) {
+    $hasChanges = $true
+    Write-Host ""
+    Write-Host "=== UNTRACKED FILES TO BE REMOVED ===" -ForegroundColor Red
+    foreach ($file in $untrackedFiles) {
+      Write-Host "  [-] $file" -ForegroundColor Red
+      $remCount++
+    }
+  }
+
+  if (-not $hasChanges) {
+    Write-Host ""
+    Write-Success "No changes detected. Profile is already up to date."
+    return $false
+  }
+
+  Write-Host ""
+  Write-Host "=== SUMMARY ===" -ForegroundColor Cyan
+  if ($addCount -gt 0) { Write-Host "  [+] Added:    $addCount file(s)" -ForegroundColor Green }
+  if ($modCount -gt 0) { Write-Host "  [~] Modified: $modCount file(s)" -ForegroundColor Yellow }
+  if ($delCount -gt 0) { Write-Host "  [-] Deleted:  $delCount file(s)" -ForegroundColor Red }
+  if ($remCount -gt 0) { Write-Host "  [-] Removed:  $remCount file(s)" -ForegroundColor Red }
+  Write-Host ""
+  
+  $confirm = Read-Host "$script:Arrow Continue with sync? (Y/N)"
+  return ($confirm -match '^[Yy]')
+}
+
+function Fetch-FromRemote {
+  param([Parameter(Mandatory=$true)][string]$BranchName)
+
   $r = Invoke-Git @("fetch","--prune","origin",$BranchName)
-  $r.Output | Out-Host
   if ($r.ExitCode -ne 0) {
     throw "git fetch failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")"
   }
+}
 
-  Write-Host "Overwriting tracked files to match origin/$BranchName (keeping untracked files)..."
+function Apply-SyncChanges {
+  param([Parameter(Mandatory=$true)][string]$BranchName)
+
+  Write-Info "Resetting to origin/$BranchName..."
   $r = Invoke-Git @("reset","--hard","origin/$BranchName")
-  $r.Output | Out-Host
   if ($r.ExitCode -ne 0) {
     throw "git reset --hard failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")"
   }
+  Write-Success "Files updated"
 
-  # Important: do NOT run git clean -fd (would delete untracked files)
+  Write-Info "Removing untracked files..."
+  $r = Invoke-Git @("clean","-fd")
+  if ($r.ExitCode -ne 0) {
+    throw "git clean failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")"
+  }
+  Write-Success "Untracked files removed"
 
-  Write-Host "Pulling LFS files..."
+  Write-Info "Pulling LFS files..."
   $r = Invoke-Git @("lfs","pull")
-  $r.Output | Out-Host
   if ($r.ExitCode -ne 0) {
     throw "git lfs pull failed with exit code: $($r.ExitCode)`n$(@($r.Output) -join "`n")"
   }
+  Write-Success "LFS files downloaded"
 }
 
 # --- Main ---
 try {
-  $profilePath = Select-ModrinthProfileFolder
-  Write-Host "Selected profile: $profilePath"
+  Write-Host "" 
+  Write-Host "================================" -ForegroundColor Cyan
+  Write-Host "   KERSTBUS SYNC TOOL" -ForegroundColor Cyan
+  Write-Host "================================" -ForegroundColor Cyan
+  Write-Host ""
 
-  Write-Host "Checking for required software..."
+  $profilePath = Select-ModrinthProfileFolder
+  Write-Success "Selected profile: $profilePath"
+
+  Write-Step "Checking for required software..."
   Ensure-AppInstalled -ExeName "git"     -WingetId "Git.Git"
   Ensure-AppInstalled -ExeName "git-lfs" -WingetId "GitHub.GitLFS"
 
-  $createBackup = Read-Host "Create backup before syncing? (Y/N)"
-  if ($createBackup -match '^[Yy]') {
-    Write-Host "Creating backup..."
-    New-ProfileBackupZip -ProfilePath $profilePath
-  } else {
-    Write-Host "Skipping backup..."
-  }
-
-  Write-Host "Setting up repository..."
+  Write-Step "Setting up repository..."
   Ensure-RepoSetup -Path $profilePath
   Ensure-LfsReady
+  Write-Success "Repository configured"
 
-  Write-Host "Syncing with repository..."
-  Sync-ToRemote -BranchName $Branch
+  Write-Step "Checking for updates..."
+  Fetch-FromRemote -BranchName $Branch
+  Write-Success "Updates fetched"
 
-  Write-Host "Done. Profile is up to date."
+  if (-not (Show-SyncPreview -BranchName $Branch)) {
+    Write-Host ""
+    Write-Info "Sync cancelled or no changes needed."
+  } else {
+    Write-Step "Applying changes..."
+    Apply-SyncChanges -BranchName $Branch
+    Write-Host ""
+    Write-Host "================================" -ForegroundColor Green
+    Write-Success "Profile is up to date!"
+    Write-Host "================================" -ForegroundColor Green
+  }
 } catch {
-  Write-Host "`nERROR: $($_.Exception.Message)" -ForegroundColor Red
-  Write-Host "`nFull error details:" -ForegroundColor Yellow
+  Write-Host ""
+  Write-Host "================================" -ForegroundColor Red
+  Write-Error-Custom "$($_.Exception.Message)"
+  Write-Host "================================" -ForegroundColor Red
+  Write-Host ""
+  Write-Host "Full error details:" -ForegroundColor Yellow
   Write-Host $_.Exception | Format-List -Force
   Write-Host $_.ScriptStackTrace -ForegroundColor Yellow
 }
